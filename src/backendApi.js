@@ -47,5 +47,23 @@ export async function submitAiResult(payload) {
   return res.data;
 }
 
+export async function sendWorkerHeartbeat(payload = {}) {
+  const client = getClient();
 
+  const workerId = String(process.env.WORKER_ID || "worker").trim();
+
+  const res = await client.post("/api/admin/devices/ai-worker/heartbeat", {
+    workerId,
+    workerVersion: String(
+      process.env.WORKER_VERSION ||
+      process.env.npm_package_version ||
+      "dev"
+    ).trim(),
+    hostname: String(process.env.HOSTNAME || process.env.COMPUTERNAME || "").trim(),
+    pid: process.pid,
+    ...payload,
+  });
+
+  return res.data;
+}
 

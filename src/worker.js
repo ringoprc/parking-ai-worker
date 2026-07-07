@@ -1,7 +1,11 @@
 import pLimit from "p-limit";
 import fs from "fs/promises";
 
-import { fetchAiJobs, submitAiResult } from "./backendApi.js";
+import {
+  fetchAiJobs,
+  submitAiResult,
+  sendWorkerHeartbeat,
+} from "./backendApi.js";
 import { downloadGcsObjectToTemp } from "./gcs.js";
 import { readVacancyWithLmStudio } from "./lmStudio.js";
 import { preprocessImageForVlm } from "./preprocess.js";
@@ -18,7 +22,13 @@ async function safeUnlink(filePath) {
   }
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
+async function safeSendWorkerHeartbeat(payload = {}) {
+  try {
+    await sendWorkerHeartbeat(payload);
+  } catch (err) {
+    console.warn("⚠️ Failed to send worker heartbeat:", err?.message || err);
+  }
+}
 async function processOneJob(job) {
   const imageObject = job.imageObject;
   const imageBucket = job.imageBucket;
@@ -87,6 +97,15 @@ async function processOneJob(job) {
       vacancy: saved.parsed?.vacancy,
       durationSec,
     });
+    await safeSendWorkerHeartbeat({
+      status: "processed",
+      lastProcessedAt: new Date().toISOString(),
+      lastProcessedDeviceId: job.deviceId,
+      lastProcessedImageObject: imageObject,
+      lastProcessedStatus: saved.parsed?.status || "",
+      lastProcessedVacancy: saved.parsed?.vacancy ?? null,
+      lastDurationSec: Number(durationSec),
+    });
   } finally {
     await safeUnlink(localPath);
     await safeUnlink(processedPath);
@@ -98,8 +117,17 @@ export async function startWorker() {
   const concurrency = Number(process.env.WORKER_CONCURRENCY || 1);
   const batchSize = Number(process.env.WORKER_BATCH_SIZE || 5);
 
+  const workerId = String(process.env.WORKER_ID || "worker").trim();
   console.log("🔁 Worker loop started");
   console.log({
+    workerId,
+    pollIntervalMs,
+    concurrency,
+    batchSize,
+  });
+
+  await safeSendWorkerHeartbeat({
+    status: "started",
     pollIntervalMs,
     concurrency,
     batchSize,
@@ -110,12 +138,27 @@ export async function startWorker() {
   while (true) {
     try {
 
+      await safeSendWorkerHeartbeat({
+        status: "polling",
+        pollIntervalMs,
+        concurrency,
+        batchSize,
+      });
+
       const jobs = await fetchAiJobs({
         limit: batchSize,
       });
 
       if (jobs.length === 0) {
         console.log(`😴 No AI jobs. Sleeping ${pollIntervalMs}ms...`);
+
+        await safeSendWorkerHeartbeat({
+          status: "idle",
+          pollIntervalMs,
+          concurrency,
+          batchSize,
+        });
+
         await sleep(pollIntervalMs);
         continue;
       }
@@ -128,6 +171,13 @@ export async function startWorker() {
     } catch (err) {
       console.error("❌ Worker loop error:");
       console.error(err);
+
+      await safeSendWorkerHeartbeat({
+        status: "error",
+        lastErrorAt: new Date().toISOString(),
+        lastErrorMessage: String(err?.message || err || "").slice(0, 1000),
+      });
+
       await sleep(pollIntervalMs);
     }
   }
