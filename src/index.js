@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { startWorker } from "./worker.js";
+import { startMonitorServer } from "./monitor.js";
 
 async function main() {
   console.log("🚗 Parking AI Worker starting...");
@@ -13,6 +14,7 @@ async function main() {
   }
 
   console.log("✅ Startup checks passed");
+  startMonitorServer();
   await startWorker();
 }
 

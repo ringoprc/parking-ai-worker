@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0a0d0c" />
+  <title>Parking AI · Worker Monitor</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand"><span class="brand-mark">P</span><div><p class="eyebrow">PARKING AI</p><h1>Worker monitor</h1></div></div>
+      <div class="connection"><span id="connectionDot" class="dot"></span><span id="connectionLabel">Connecting</span><time id="clock"></time></div>
+    </header>
+
+    <section class="hero">
+      <div><p class="eyebrow">LIVE PROCESSING</p><h2 id="heroTitle">Warming up the worker.</h2><p id="heroCopy" class="muted">Waiting for the first worker update…</p></div>
+      <div class="pulse-wrap">
+        <div class="pulse"><span id="activeCount">0</span><small>ACTIVE</small></div>
+        <div class="pulse completed-pulse"><span id="completedCount">0</span><small>完成</small></div>
+      </div>
+    </section>
+
+    <section id="metrics" class="metrics"></section>
+
+    <section class="workbench">
+      <div class="panel queue-panel">
+        <div class="panel-head"><div><p class="eyebrow">PROCESSING FLOOR</p><h3>Job pipeline</h3></div><span id="pipelineMeta" class="chip">No jobs yet</span></div>
+        <div class="stage-key" aria-hidden="true">
+          <span></span>
+          <div class="stage-labels"><span>Download</span><span>Prepare</span><span>VLM</span><span>Submit</span><span>Done</span></div>
+          <span></span>
+        </div>
+        <div id="jobs" class="jobs"><div class="empty">The floor is quiet. New work will appear here automatically.</div></div>
+      </div>
+      <aside class="panel watchlist-panel">
+        <div class="panel-head"><div class="watchlist-heading"><p class="eyebrow">FLEET QUALITY</p><h3>裝置列表</h3><input id="watchlistSearch" class="watchlist-search" type="search" placeholder="搜尋裝置 ID 或停車場名稱" aria-label="搜尋裝置 ID 或停車場名稱" autocomplete="off"></div><span id="watchlistMeta" class="chip">0 台裝置</span></div>
+        <div id="watchlistTabs" class="watchlist-tabs" role="tablist" aria-label="Device result quality">
+          <button type="button" class="watchlist-tab active" data-watchlist-tab="healthy" role="tab" aria-selected="true">成功較多</button>
+          <button type="button" class="watchlist-tab" data-watchlist-tab="attention" role="tab" aria-selected="false">無法辨識 / 失敗</button>
+        </div>
+        <div id="deviceIssues" class="device-issues" role="tabpanel"><div class="empty">Devices with completed attempts will appear here.</div></div>
+      </aside>
+    </section>
+
+    <section class="panel failures-panel">
+      <div class="panel-head"><div><p class="eyebrow danger">DIAGNOSTICS</p><h3>Recent failures</h3></div><span id="failureMeta" class="chip">0 retained</span></div>
+      <div id="failures" class="failures"><div class="empty compact">No failures recorded since this worker started.</div></div>
+    </section>
+
+    <section class="panel system-panel">
+      <div class="panel-head"><div><p class="eyebrow">RUNTIME</p><h3>Worker configuration</h3></div><span id="workerId" class="mono"></span></div>
+      <div id="config" class="config"></div>
+    </section>
+
+    <section class="panel activity-panel activity-full">
+      <div class="panel-head"><div><p class="eyebrow">EVENT STREAM</p><h3>Activity</h3></div><button id="pauseButton" type="button">Pause</button></div>
+      <div id="events" class="events"><div class="empty">Listening for worker activity…</div></div>
+    </section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

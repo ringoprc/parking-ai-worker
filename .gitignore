@@ -4,3 +4,6 @@ tmp
 .DS_Store
 npm-debug.log*
 yarn-error.log*
+parkinglotmagic-*.json
+service-account.json
+google-credentials.json

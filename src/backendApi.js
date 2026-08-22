@@ -33,7 +33,15 @@ export async function fetchAiJobs({ limit }) {
     },
   });
 
-  return Array.isArray(res.data?.rows) ? res.data.rows : [];
+  return {
+    jobs: Array.isArray(res.data?.rows) ? res.data.rows : [],
+    // Optional fleet-wide aggregate supplied by the backend. Older backend
+    // responses remain valid while this field is being implemented.
+    fleetStats:
+      res.data?.fleetStats && typeof res.data.fleetStats === "object"
+        ? res.data.fleetStats
+        : null,
+  };
 }
 
 export async function submitAiResult(payload) {
@@ -52,18 +60,25 @@ export async function sendWorkerHeartbeat(payload = {}) {
 
   const workerId = String(process.env.WORKER_ID || "worker").trim();
 
-  const res = await client.post("/api/admin/devices/ai-worker/heartbeat", {
-    workerId,
-    workerVersion: String(
-      process.env.WORKER_VERSION ||
-      process.env.npm_package_version ||
-      "dev"
-    ).trim(),
-    hostname: String(process.env.HOSTNAME || process.env.COMPUTERNAME || "").trim(),
-    pid: process.pid,
-    ...payload,
-  });
+  const res = await client.post(
+    "/api/admin/devices/ai-worker/heartbeat",
+    {
+      workerId,
+      workerVersion: String(
+        process.env.WORKER_VERSION ||
+        process.env.npm_package_version ||
+        "dev"
+      ).trim(),
+      hostname: String(
+        process.env.HOSTNAME || process.env.COMPUTERNAME || ""
+      ).trim(),
+      pid: process.pid,
+      ...payload,
+    },
+    {
+      timeout: Number(process.env.WORKER_HEARTBEAT_TIMEOUT_MS || 5000),
+    }
+  );
 
   return res.data;
 }
-
