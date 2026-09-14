@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
-    "test": "node --test src/**/*.test.js"
+    "test": "node --test"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.19.0",
