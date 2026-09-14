@@ -1,4 +1,5 @@
 import axios from "axios";
+import { workerIdentity } from "./workerIdentity.js";
 
 function getBackendBaseUrl() {
   const value = String(process.env.BACKEND_BASE_URL || "").trim();
@@ -18,7 +19,9 @@ function getClient() {
     timeout: 120000,
     headers: {
       "x-worker-key": getWorkerApiKey(),
-      "x-worker-id": String(process.env.WORKER_ID || "worker").trim(),
+      "x-worker-id": workerIdentity.workerId,
+      "x-worker-session-id": workerIdentity.sessionId,
+      "x-worker-version": workerIdentity.workerVersion,
     },
   });
 }
@@ -29,7 +32,7 @@ export async function fetchAiJobs({ limit }) {
   const res = await client.get("/api/admin/devices/ai-worker/jobs", {
     params: {
       limit,
-      workerId: String(process.env.WORKER_ID || "worker").trim(),
+      workerId: workerIdentity.workerId,
     },
   });
 
@@ -49,8 +52,57 @@ export async function submitAiResult(payload) {
 
   const res = await client.post("/api/admin/devices/ai-worker/results", {
     ...payload,
-    workerId: String(process.env.WORKER_ID || "worker").trim(),
+    workerId: workerIdentity.workerId,
+    workerSessionId: workerIdentity.sessionId,
   });
+
+  return res.data;
+}
+
+export async function reportAttemptProgress(payload) {
+  if (!payload?.attemptId) return null;
+
+  const client = getClient();
+  const attemptId = encodeURIComponent(payload.attemptId);
+  const res = await client.patch(
+    `/api/admin/devices/ai-worker/attempts/${attemptId}`,
+    {
+      stage: payload.stage,
+      startedAt: payload.startedAt,
+      timings: payload.timings,
+      workerId: workerIdentity.workerId,
+      workerSessionId: workerIdentity.sessionId,
+    },
+    {
+      timeout: Number(process.env.WORKER_PROGRESS_TIMEOUT_MS || 3000),
+    }
+  );
+
+  return res.data;
+}
+
+export async function reportAttemptFailure(payload) {
+  if (!payload?.attemptId) return null;
+
+  const client = getClient();
+  const attemptId = encodeURIComponent(payload.attemptId);
+  const res = await client.post(
+    `/api/admin/devices/ai-worker/attempts/${attemptId}/failure`,
+    {
+      outcome: payload.outcome || "failed",
+      stage: payload.stage,
+      context: payload.context,
+      code: payload.code,
+      message: payload.message,
+      startedAt: payload.startedAt,
+      timings: payload.timings,
+      workerId: workerIdentity.workerId,
+      workerSessionId: workerIdentity.sessionId,
+    },
+    {
+      timeout: Number(process.env.WORKER_PROGRESS_TIMEOUT_MS || 3000),
+    }
+  );
 
   return res.data;
 }
@@ -58,17 +110,15 @@ export async function submitAiResult(payload) {
 export async function sendWorkerHeartbeat(payload = {}) {
   const client = getClient();
 
-  const workerId = String(process.env.WORKER_ID || "worker").trim();
+  const workerId = workerIdentity.workerId;
 
   const res = await client.post(
     "/api/admin/devices/ai-worker/heartbeat",
     {
       workerId,
-      workerVersion: String(
-        process.env.WORKER_VERSION ||
-        process.env.npm_package_version ||
-        "dev"
-      ).trim(),
+      workerSessionId: workerIdentity.sessionId,
+      workerVersion: workerIdentity.workerVersion,
+      startedAt: workerIdentity.startedAt,
       hostname: String(
         process.env.HOSTNAME || process.env.COMPUTERNAME || ""
       ).trim(),

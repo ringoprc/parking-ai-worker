@@ -4,6 +4,8 @@ import sharp from "sharp";
 
 import {
   fetchAiJobs,
+  reportAttemptFailure,
+  reportAttemptProgress,
   submitAiResult,
   sendWorkerHeartbeat,
 } from "./backendApi.js";
@@ -20,6 +22,7 @@ import {
   updateMonitor,
   updateMonitoredJob,
 } from "./monitor.js";
+import { workerIdentity } from "./workerIdentity.js";
 
 async function safeUnlink(filePath) {
   if (!filePath) return;
@@ -44,9 +47,15 @@ async function safeSendWorkerHeartbeat(payload = {}) {
 
 const heartbeatState = {
   status: "starting",
-  processedCount: 0,
+  activeJobCount: 0,
+  pendingSubmissionCount: 0,
+  discoveredCount: 0,
+  completedCount: 0,
+  recognizedCount: 0,
+  unknownCount: 0,
   staleCount: 0,
   failedCount: 0,
+  totalProcessingMs: 0,
 };
 
 function updateHeartbeatState(payload = {}) {
@@ -67,7 +76,72 @@ function logStageTiming(deviceId, stage, durationMs) {
   console.log(`⏱️ ${stage}: ${formatDuration(durationMs)}`);
 }
 
-function startHeartbeatTimer({ intervalMs, pollIntervalMs, concurrency, batchSize }) {
+function serializeAttemptTimings(timings = {}) {
+  return {
+    downloadMs: timings.downloadMs,
+    metadataMs: timings.imageMetadataMs,
+    prepareMs: timings.preprocessMs,
+    vlmQueueMs: timings.vlmQueueMs,
+    vlmMs: timings.vlmMs,
+    submitQueueMs: timings.submitQueueMs,
+    totalMs: timings.totalMs,
+  };
+}
+
+function queueAttemptProgress(job, stage, startedAt, timings = {}) {
+  if (!job?.attemptId) return Promise.resolve();
+
+  job.__attemptStage = stage;
+  job.__attemptStartedAt = startedAt;
+
+  const previous = job.__attemptProgressPromise || Promise.resolve();
+  const payload = {
+    attemptId: job.attemptId,
+    stage,
+    startedAt,
+    timings: { ...timings },
+  };
+
+  job.__attemptProgressPromise = previous
+    .then(() => reportAttemptProgress(payload))
+    .catch((err) => {
+      console.warn(
+        `⚠️ Failed to report ${stage} progress for ${job.deviceId}:`,
+        err?.message || err
+      );
+    });
+
+  return job.__attemptProgressPromise;
+}
+
+function queueAttemptFailure(job, err, context, outcome = "failed") {
+  if (!job?.attemptId) return Promise.resolve();
+
+  const previous = job.__attemptProgressPromise || Promise.resolve();
+  const payload = {
+    attemptId: job.attemptId,
+    outcome,
+    stage: job.__attemptStage || "claimed",
+    context,
+    code: String(err?.response?.data?.error || err?.code || "").slice(0, 160),
+    message: String(err?.message || err || "Unknown worker error").slice(0, 2000),
+    startedAt: job.__attemptStartedAt,
+    timings: serializeAttemptTimings(job.__attemptTimings),
+  };
+
+  job.__attemptProgressPromise = previous
+    .then(() => reportAttemptFailure(payload))
+    .catch((reportError) => {
+      console.warn(
+        `⚠️ Failed to report ${outcome} attempt for ${job.deviceId}:`,
+        reportError?.message || reportError
+      );
+    });
+
+  return job.__attemptProgressPromise;
+}
+
+function startHeartbeatTimer({ intervalMs, ...workerConfig }) {
   let sending = false;
 
   const timer = setInterval(async () => {
@@ -77,9 +151,8 @@ function startHeartbeatTimer({ intervalMs, pollIntervalMs, concurrency, batchSiz
     try {
       await safeSendWorkerHeartbeat({
         ...heartbeatState,
-        pollIntervalMs,
-        concurrency,
-        batchSize,
+        ...workerConfig,
+        heartbeatIntervalMs: intervalMs,
       });
     } finally {
       sending = false;
@@ -110,7 +183,7 @@ function logWorkerError(err) {
   console.error("❌ Worker loop error:", err?.message || err);
 }
 
-function recordJobFailure(job, err, context = "AI job") {
+async function recordJobFailure(job, err, context = "AI job") {
   if (
     err?.response?.status === 409 &&
     err?.response?.data?.error === "stale_ai_processing_lock"
@@ -122,6 +195,7 @@ function recordJobFailure(job, err, context = "AI job") {
       `⚠️ Skipping stale AI result for device ${job?.deviceId || "unknown"}.`
     );
     if (job?.__monitorId) updateMonitoredJob(job.__monitorId, { status: "stale", stage: "complete" });
+    await queueAttemptFailure(job, err, context, "stale");
     return;
   }
 
@@ -133,6 +207,7 @@ function recordJobFailure(job, err, context = "AI job") {
   console.error(`❌ ${context} failed for device ${job?.deviceId || "unknown"}.`);
   if (job?.__monitorId) failMonitoredJob(job.__monitorId, err?.message || err, context);
   logWorkerError(err);
+  await queueAttemptFailure(job, err, context);
 }
 
 function createSubmissionQueue({ concurrency, maxPending }) {
@@ -175,16 +250,32 @@ function createSubmissionQueue({ concurrency, maxPending }) {
   };
 }
 
-async function enqueueAiResult({ job, rawText, submissionQueue, processingStartedAt }) {
+async function enqueueAiResult({
+  job,
+  rawText,
+  submissionQueue,
+  processingStartedAt,
+  attemptStartedAt,
+  timings,
+}) {
   await submissionQueue.enqueue(job, async (queueMs) => {
+    await (job.__attemptProgressPromise || Promise.resolve());
+
     const submitStartedAt = performance.now();
     const saved = await submitAiResult({
+      attemptId: job.attemptId,
       phoneId: job.phoneId,
       deviceId: job.deviceId,
       imageObject: job.imageObject,
       rawText,
       model: process.env.LM_STUDIO_MODEL,
       processedImagePath: null,
+      startedAt: attemptStartedAt,
+      timings: {
+        ...serializeAttemptTimings(timings),
+        submitQueueMs: queueMs,
+        totalMs: elapsedMs(processingStartedAt),
+      },
     });
     const submitMs = elapsedMs(submitStartedAt);
     const endToEndMs = elapsedMs(processingStartedAt);
@@ -212,12 +303,22 @@ async function enqueueAiResult({ job, rawText, submissionQueue, processingStarte
 
     updateHeartbeatState({
       status: "processed",
-      processedCount: heartbeatState.processedCount + 1,
+      completedCount: heartbeatState.completedCount + 1,
+      recognizedCount:
+        heartbeatState.recognizedCount +
+        (saved.parsed?.status === "ok" ? 1 : 0),
+      unknownCount:
+        heartbeatState.unknownCount +
+        (saved.parsed?.status === "ok" ? 0 : 1),
+      totalProcessingMs: heartbeatState.totalProcessingMs + endToEndMs,
       lastProcessedAt: new Date().toISOString(),
       lastProcessedDeviceId: job.deviceId,
       lastProcessedImageObject: job.imageObject,
       lastProcessedStatus: saved.parsed?.status || "",
+      lastProcessedAvailabilityMode: saved.parsed?.availabilityMode || null,
       lastProcessedVacancy: saved.parsed?.vacancy ?? null,
+      lastProcessedHasAvailableSpace:
+        saved.parsed?.hasAvailableSpace ?? null,
       lastDurationSec: Number((endToEndMs / 1000).toFixed(1)),
     });
     finishMonitoredJob(job.__monitorId, {
@@ -250,6 +351,12 @@ async function processOneJob(job, { prepareLimit, vlmLimit, submissionQueue }) {
     return;
   }
 
+  const attemptStartedAt = new Date().toISOString();
+  queueAttemptProgress(job, "download", attemptStartedAt);
+  updateHeartbeatState({
+    activeJobCount: heartbeatState.activeJobCount + 1,
+  });
+
   console.log("");
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   console.log("📱 PhoneID [", job.deviceId, "]");
@@ -257,6 +364,7 @@ async function processOneJob(job, { prepareLimit, vlmLimit, submissionQueue }) {
 
   const startedAt = performance.now();
   const timings = {};
+  job.__attemptTimings = timings;
 
   let localPath;
   let processedPath;
@@ -272,6 +380,9 @@ async function processOneJob(job, { prepareLimit, vlmLimit, submissionQueue }) {
       logStageTiming(job.deviceId, "GCS download", timings.downloadMs);
 
       updateMonitoredJob(job.__monitorId, { stage: "prepare" });
+      queueAttemptProgress(job, "prepare", attemptStartedAt, {
+        downloadMs: timings.downloadMs,
+      });
       stageStartedAt = performance.now();
       const imageMetadata = await sharp(localPath).metadata();
       timings.imageMetadataMs = elapsedMs(stageStartedAt);
@@ -295,6 +406,11 @@ async function processOneJob(job, { prepareLimit, vlmLimit, submissionQueue }) {
 
     console.log("🤖 Sending processed image to LM Studio...");
     updateMonitoredJob(job.__monitorId, { stage: "vlm" });
+    queueAttemptProgress(job, "vlm", attemptStartedAt, {
+      downloadMs: timings.downloadMs,
+      metadataMs: timings.imageMetadataMs,
+      prepareMs: timings.preprocessMs,
+    });
     /*
     console.log(
       job.usesCustomPrompt
@@ -324,11 +440,20 @@ async function processOneJob(job, { prepareLimit, vlmLimit, submissionQueue }) {
     console.log("");
 
     updateMonitoredJob(job.__monitorId, { stage: "submit" });
+    queueAttemptProgress(job, "submit", attemptStartedAt, {
+      downloadMs: timings.downloadMs,
+      metadataMs: timings.imageMetadataMs,
+      prepareMs: timings.preprocessMs,
+      vlmQueueMs: timings.vlmQueueMs,
+      vlmMs: timings.vlmMs,
+    });
     await enqueueAiResult({
       job,
       rawText: result.raw,
       submissionQueue,
       processingStartedAt: startedAt,
+      attemptStartedAt,
+      timings,
     });
   } finally {
     const cleanupStartedAt = performance.now();
@@ -336,6 +461,9 @@ async function processOneJob(job, { prepareLimit, vlmLimit, submissionQueue }) {
     await safeUnlink(processedPath);
     timings.cleanupMs = elapsedMs(cleanupStartedAt);
     timings.totalMs = elapsedMs(startedAt);
+    updateHeartbeatState({
+      activeJobCount: Math.max(0, heartbeatState.activeJobCount - 1),
+    });
 
     //logStageTiming(job.deviceId, "Temp-file cleanup", timings.cleanupMs);
     const durationSec = (elapsedMs(startedAt) / 1000).toFixed(1);
@@ -377,10 +505,11 @@ export async function startWorker() {
     process.env.WORKER_HEARTBEAT_INTERVAL_MS || 15000
   );
 
-  const workerId = String(process.env.WORKER_ID || "worker").trim();
+  const workerId = workerIdentity.workerId;
   console.log("🔁 Worker loop started");
   console.log({
     workerId,
+    workerSessionId: workerIdentity.sessionId,
     pollIntervalMs,
     concurrency,
     batchSize,
@@ -404,10 +533,17 @@ export async function startWorker() {
   monitorEvent("system", `Worker ${workerId} started`);
 
   await safeSendWorkerHeartbeat({
+    ...heartbeatState,
     status: "started",
     pollIntervalMs,
     concurrency,
     batchSize,
+    prepareConcurrency,
+    vlmConcurrency,
+    submitConcurrency,
+    maxPendingSubmissions,
+    heartbeatIntervalMs,
+    modelName: String(process.env.LM_STUDIO_MODEL || "").trim(),
   });
 
   startHeartbeatTimer({
@@ -415,6 +551,11 @@ export async function startWorker() {
     pollIntervalMs,
     concurrency,
     batchSize,
+    prepareConcurrency,
+    vlmConcurrency,
+    submitConcurrency,
+    maxPendingSubmissions,
+    modelName: String(process.env.LM_STUDIO_MODEL || "").trim(),
   });
 
   const prepareLimit = pLimit(prepareConcurrency);
@@ -429,6 +570,7 @@ export async function startWorker() {
 
       updateHeartbeatState({
         status: "polling",
+        lastPollAt: new Date().toISOString(),
       });
 
       const { jobs, fleetStats } = await fetchAiJobs({
@@ -450,7 +592,10 @@ export async function startWorker() {
 
       console.log(`📦 Found ${jobs.length} AI job(s).`);
       discoverJobs(jobs.length);
-      updateHeartbeatState({ status: "processing" });
+      updateHeartbeatState({
+        status: "processing",
+        discoveredCount: heartbeatState.discoveredCount + jobs.length,
+      });
 
       const results = await Promise.allSettled(
         jobs.map((job) =>
@@ -458,14 +603,14 @@ export async function startWorker() {
         )
       );
 
-      results.forEach((result, index) => {
-        if (result.status === "rejected") {
-          const job = jobs[index];
-          const err = result.reason;
+      await Promise.all(
+        results.map((result, index) => {
+          if (result.status !== "rejected") return null;
 
-          recordJobFailure(job, err);
-        }
-      });
+          const job = jobs[index];
+          return recordJobFailure(job, result.reason);
+        })
+      );
     } catch (err) {
       logWorkerError(err);
 
