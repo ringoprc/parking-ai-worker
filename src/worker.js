@@ -88,11 +88,28 @@ function serializeAttemptTimings(timings = {}) {
   };
 }
 
+export function progressTelemetryEnabled() {
+  const value = String(
+    process.env.WORKER_PROGRESS_TELEMETRY_ENABLED ?? "true"
+  )
+    .trim()
+    .toLowerCase();
+
+  return !["0", "false", "off", "no"].includes(value);
+}
+
 function queueAttemptProgress(job, stage, startedAt, timings = {}) {
   if (!job?.attemptId) return Promise.resolve();
 
   job.__attemptStage = stage;
   job.__attemptStartedAt = startedAt;
+
+  // Temporary, reversible load-shedding switch. Final result and failure
+  // telemetry remain enabled; only intermediate stage PATCHes are skipped.
+  if (!progressTelemetryEnabled()) {
+    job.__attemptProgressPromise = Promise.resolve();
+    return job.__attemptProgressPromise;
+  }
 
   const previous = job.__attemptProgressPromise || Promise.resolve();
   const payload = {
@@ -518,6 +535,7 @@ export async function startWorker() {
     submitConcurrency,
     maxPendingSubmissions,
     heartbeatIntervalMs,
+    progressTelemetryEnabled: progressTelemetryEnabled(),
   });
 
   configureMonitor({
@@ -529,6 +547,7 @@ export async function startWorker() {
     submitConcurrency,
     maxPendingSubmissions,
     heartbeatIntervalMs,
+    progressTelemetryEnabled: progressTelemetryEnabled(),
   });
   monitorEvent("system", `Worker ${workerId} started`);
 
